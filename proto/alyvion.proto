@@ -1,0 +1,242 @@
+syntax = "proto3";
+
+package alyvion;
+
+option csharp_namespace = "Alyvion.Core.Grpc";
+
+// #############################################################################
+//  Alyvion — протокол взаимодействия Core <-> Agent
+//  ЕДИНЫЙ ИСТОЧНИК ИСТИНЫ для обеих сторон:
+//    * Core  (.NET)  — Alyvion.Core.EventCollector/Protos -> этот файл
+//    * Agent (Rust)  — alyvion-agent/build.rs компилирует этот же файл
+//  Меняя контракт, правьте ТОЛЬКО этот файл.
+//
+//  Транспорт: gRPC (HTTP/2). В целевой конфигурации — поверх mTLS,
+//  где каждый агент имеет собственный клиентский сертификат, а Core
+//  проверяет его при установлении соединения.
+//
+//  Модель взаимодействия — ОДИН двунаправленный поток на агента:
+//    Agent -> Core : регистрация, heartbeat, телеметрия,
+//                    события безопасности, результаты реагирования.
+//    Core  -> Agent: подтверждение регистрации, команды реагирования,
+//                    подтверждения приёма, ping.
+//
+//  Все временные метки — int64, Unix time в МИЛЛИСЕКУНДАХ (UTC).
+// #############################################################################
+
+service AlyvionCore {
+  // Двунаправленный поток. Агент открывает соединение и первым
+  // отправляет AgentHello; Core отвечает AgentHelloAck.
+  //
+  // Имя метода — OpenChannel, а НЕ Connect: tonic генерирует для клиента
+  // собственный конструктор `connect()`, и одноимённый RPC создаёт
+  // конфликт определений в сгенерированном коде Rust.
+  rpc OpenChannel (stream AgentMessage) returns (stream CoreMessage);
+}
+
+// ============================================================================
+//  Сообщения Agent -> Core
+// ============================================================================
+
+message AgentMessage {
+  oneof payload {
+    AgentHello hello = 1;
+    AgentHeartbeat heartbeat = 2;
+    TelemetryReport telemetry = 3;
+    SecurityEventBatch events = 4;
+    ResponseCommandResult command_result = 5;
+  }
+}
+
+// Первое сообщение в потоке: идентификация и описание узла.
+message AgentHello {
+  string agent_id = 1;          // стабильный идентификатор узла
+  string hostname = 2;
+  string os_family = 3;         // "linux" | "windows" | "database"
+  string os_version = 4;        // напр. "Fedora Linux 44 (KDE Plasma)"
+  string kernel_version = 5;    // напр. "6.11.4-301.fc41.x86_64"
+  string architecture = 6;      // "x86_64" | "aarch64"
+  string agent_version = 7;
+  repeated string ip_addresses = 8;
+  int64 boot_time_unix_ms = 9;
+
+  // Какие типы реагирования агент умеет выполнять. Core ОБЯЗАН
+  // проверять этот список и не отправлять неподдерживаемые команды.
+  repeated ResponseActionType capabilities = 10;
+
+  // Активные источники событий, напр. "journald", "auth.log", "auditd".
+  repeated string collectors = 11;
+}
+
+message AgentHeartbeat {
+  int64 timestamp_unix_ms = 1;
+  int64 uptime_secs = 2;
+  uint32 process_count = 3;
+}
+
+// Периодический снимок состояния узла.
+message TelemetryReport {
+  int64 timestamp_unix_ms = 1;
+
+  double cpu_usage_percent = 2;     // 0..100 (или 0..N*100 при нескольких ядрах)
+  uint32 cpu_cores = 3;
+  double load_avg_1 = 4;
+  double load_avg_5 = 5;
+  double load_avg_15 = 6;
+
+  uint64 memory_total_kb = 7;
+  uint64 memory_used_kb = 8;
+  uint64 swap_total_kb = 9;
+  uint64 swap_used_kb = 10;
+
+  uint64 disk_total_kb = 11;
+  uint64 disk_used_kb = 12;
+
+  uint64 net_rx_kb = 13;            // суммарно с момента загрузки
+  uint64 net_tx_kb = 14;
+
+  int64 uptime_secs = 15;
+  uint32 process_count = 16;
+
+  // Полный снимок процессов («последний известный срез»).
+  repeated ProcessInfo processes = 17;
+}
+
+message ProcessInfo {
+  uint32 pid = 1;
+  uint32 ppid = 2;
+  string name = 3;
+  string exe_path = 4;
+  string command_line = 5;
+  string user = 6;
+  double cpu_usage = 7;
+  uint64 memory_kb = 8;
+  string status = 9;                // Run | Sleep | Zombie | ...
+  int64 start_time_unix_ms = 10;
+}
+
+// Пакет нормализованных событий безопасности.
+message SecurityEventBatch {
+  repeated SecurityEvent events = 1;
+}
+
+// Событие безопасности, приведённое агентом к единой схеме.
+// Словари значений (рекомендуемые):
+//   source:   auth.log | journald | auditd | sysmon | wineventlog | security | agent
+//   category: authentication | process | network | privilege | file | system | configuration
+//   severity: info | low | medium | high | critical
+//   outcome:  success | failure | unknown
+message SecurityEvent {
+  string event_id = 1;              // UUID, генерирует агент (идемпотентность)
+  int64 timestamp_unix_ms = 2;
+
+  string source = 3;
+  string category = 4;
+  string action = 5;                // login | logout | sudo | process_start | connect | ...
+  string severity = 6;
+  string outcome = 7;
+
+  string message = 8;               // человекочитаемое описание
+  string user = 9;
+  string source_ip = 10;
+  string dest_ip = 11;
+  uint32 pid = 12;
+  string process_name = 13;
+
+  // Дополнительные поля конкретного источника (не нормализованные).
+  map<string, string> raw_fields = 14;
+
+  // true — событие сгенерировано встроенным симулятором (нет доступа
+  // к реальным журналам). Позволяет не путать демо-данные с реальными.
+  bool simulated = 15;
+}
+
+// ============================================================================
+//  Сообщения Core -> Agent
+// ============================================================================
+
+message CoreMessage {
+  oneof payload {
+    AgentHelloAck hello_ack = 1;
+    ResponseCommand command = 2;
+    ServerAcknowledgement ack = 3;
+    ServerPing ping = 4;
+  }
+}
+
+message AgentHelloAck {
+  bool accepted = 1;
+  string server_version = 2;
+  string message = 3;
+
+  // Core управляет режимом работы агента.
+  int32 telemetry_interval_secs = 4;
+  int32 heartbeat_interval_secs = 5;
+  bool allow_response_actions = 6;
+}
+
+// Команда реагирования. Агент выполняет ТОЛЬКО действия из
+// перечисления ResponseActionType и только если они объявлены
+// в его capabilities.
+message ResponseCommand {
+  string command_id = 1;            // UUID команды (идемпотентность)
+  ResponseActionType action = 2;
+
+  // Параметры, зависящие от действия:
+  //   BLOCK_IP / UNBLOCK_IP   -> ip, duration_secs
+  //   KILL_PROCESS            -> pid
+  //   DISABLE_USER            -> user
+  //   ISOLATE_HOST            -> (нет) / allow_ips
+  //   COLLECT_FORENSICS       -> targets
+  string param_ip = 3;
+  uint32 param_pid = 4;
+  string param_user = 5;
+  int32 param_duration_secs = 6;
+  repeated string param_extra = 7;
+
+  int32 timeout_secs = 8;
+  string issued_by = 9;             // оператор или "auto-response"
+  string incident_ref = 10;         // номер инцидента-основания
+  int64 issued_at_unix_ms = 11;
+}
+
+message ResponseCommandResult {
+  string command_id = 1;
+  bool success = 2;
+  string message = 3;
+  int64 executed_at_unix_ms = 4;
+  int64 duration_ms = 5;
+  map<string, string> details = 6;
+  bool rejected = 7;                // команда отклонена (не разрешена/не поддержана)
+}
+
+message ServerAcknowledgement {
+  bool success = 1;
+  string message = 2;
+  uint32 accepted_count = 3;
+}
+
+message ServerPing {
+  int64 timestamp_unix_ms = 1;
+}
+
+// ============================================================================
+//  Типизированные действия реагирования
+// ============================================================================
+
+enum ResponseActionType {
+  RESPONSE_ACTION_UNSPECIFIED = 0;
+
+  BLOCK_IP = 1;          // блокировка сетевого адреса на узле
+  UNBLOCK_IP = 2;        // снятие блокировки
+  KILL_PROCESS = 3;      // завершение процесса по PID
+  DISABLE_USER = 4;      // блокировка учётной записи
+  ENABLE_USER = 5;       // разблокировка учётной записи
+  ISOLATE_HOST = 6;      // сетевая изоляция узла (кроме канала с Core)
+  RELEASE_HOST = 7;      // снятие изоляции
+  COLLECT_FORENSICS = 8; // сбор дополнительной информации об узле
+  QUARANTINE_FILE = 9;   // помещение файла в карантин
+
+  // Служебное действие: проверка доступности механизма реагирования.
+  PING_ACTION = 10;
+}
