@@ -30,6 +30,11 @@ service AlyvionCore {
   // собственный конструктор `connect()`, и одноимённый RPC создаёт
   // конфликт определений в сгенерированном коде Rust.
   rpc OpenChannel (stream AgentMessage) returns (stream CoreMessage);
+
+  // Выдача клиентского сертификата по одноразовому токену зачисления.
+  // Вызывается БЕЗ клиентского сертификата: токен и есть первый секрет.
+  // Дальше агент подключается к OpenChannel уже по mTLS.
+  rpc Enroll (EnrollRequest) returns (EnrollResponse);
 }
 
 // ============================================================================
@@ -216,6 +221,23 @@ message ServerAcknowledgement {
 
 message ServerPing {
   int64 timestamp_unix_ms = 1;
+}
+
+// Зачисление узла: оператор создаёт токен в панели, агент предъявляет
+// его один раз и получает клиентский сертификат для mTLS.
+message EnrollRequest {
+  string token = 1;
+  string hostname = 2;
+  string agent_version = 3;
+}
+
+message EnrollResponse {
+  bool accepted = 1;
+  string message = 2;
+  string agent_id = 3;
+  string ca_cert_pem = 4;
+  string client_cert_pem = 5;
+  string client_key_pem = 6;
 }
 
 // ============================================================================
