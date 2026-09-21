@@ -2,13 +2,11 @@ syntax = "proto3";
 
 package alyvion;
 
-option csharp_namespace = "Alyvion.Core.Grpc";
-
 // #############################################################################
 //  Alyvion — протокол взаимодействия Core <-> Agent
 //  ЕДИНЫЙ ИСТОЧНИК ИСТИНЫ для обеих сторон:
-//    * Core  (.NET)  — Alyvion.Core.EventCollector/Protos -> этот файл
-//    * Agent (Rust)  — alyvion-agent/build.rs компилирует этот же файл
+//    * Core  (Python) — alyvion-core компилирует этот файл
+//    * Agent (Rust)   — alyvion-agent/build.rs компилирует этот же файл
 //  Меняя контракт, правьте ТОЛЬКО этот файл.
 //
 //  Транспорт: gRPC (HTTP/2). В целевой конфигурации — поверх mTLS,
