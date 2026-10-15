@@ -126,7 +126,7 @@ message SecurityEventBatch {
 // Событие безопасности, приведённое агентом к единой схеме.
 // Словари значений (рекомендуемые):
 //   source:   auth.log | journald | auditd | sysmon | wineventlog | security | agent
-//   category: authentication | process | network | privilege | file | system | configuration
+//   category: authentication | process | network | privilege | file | system | configuration | protection
 //   severity: info | low | medium | high | critical
 //   outcome:  success | failure | unknown
 message SecurityEvent {
